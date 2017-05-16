@@ -111,6 +111,8 @@ public:
         gen_tornado_ = true;
       } else if( iter->first.compare("coding") == 0) {
         coding_ = iter->second;
+      } else if( iter->first.compare("websock") == 0) {
+        gen_websock_ = true;
       } else {
         throw "unknown option py:" + iter->first;
       }
@@ -302,6 +304,11 @@ private:
    * True if strings should be encoded using utf-8.
    */
   bool gen_utf8strings_;
+  
+  /**
+   * True if we should generate code for websockets.
+   */
+  bool gen_websock_;
 
   /**
    * specify generated file encoding
@@ -384,6 +391,63 @@ void t_py_generator::init_generator() {
     py_autogen_comment() << endl <<
     py_imports() << endl <<
     "from .ttypes import *" << endl;
+    
+  if (gen_websock_) {
+    f_consts_ << endl;
+    f_consts_ << "import threading" << endl;
+    f_consts_ << endl;
+    f_consts_ << "# We use the MSB to declare the communication party who originated" << endl;
+    f_consts_ << "# the call. This enables us to differentiate between a response message" << endl;
+    f_consts_ << "# or a request message. In bidirectional communication both type of message" << endl;
+    f_consts_ << "# can be sent from both sides." << endl;
+    f_consts_ << "ORIGIN_CLIENT = 0x00000000" << endl;
+    f_consts_ << "ORIGIN_SERVER = 0x80000000" << endl;
+    f_consts_ << "SEQ_ORIGIN_MASK = 0x80000000" << endl;
+    f_consts_ << "SEQ_ID_MASK = 0x7FFFFFFF" << endl;
+    f_consts_ << endl;
+    f_consts_ << "class ResponseReadyEvent(threading.Event):" << endl;
+    f_consts_ << endl;
+    indent_up();
+    f_consts_ << indent() << "def __init__(self):" << endl;
+    indent_up();
+    f_consts_ << indent() << "threading.Event.__init__(self)" << endl;
+    f_consts_ << indent() << "self.message_begin = None" << endl;
+    f_consts_ << indent() << "self.response_processed = threading.Event()" << endl;
+    indent_down();
+    f_consts_ << endl;
+    f_consts_ << indent() << "def set(self, message_begin):" << endl;
+    indent_up();
+    f_consts_ << indent() << "self.message_begin = message_begin" << endl;
+    f_consts_ << indent() << "threading.Event.set(self)" << endl;
+    indent_down(); indent_down();
+    f_consts_ << endl;
+    f_consts_ << indent() << "class SeqIdManager(object):" << endl;
+    f_consts_ << endl;
+    indent_up();
+    f_consts_ << indent() << "def __init__(self, origin_id=None):" << endl;
+    indent_up();
+    f_consts_ << indent() << "self._origin_id = origin_id or ORIGIN_CLIENT" << endl;
+    f_consts_ << endl;
+    indent_down();
+    f_consts_ << indent() << "@property" << endl;
+    f_consts_ << indent() << "def origin_id(self):" << endl;
+    indent_up();
+    f_consts_ << indent() << "return self._origin_id" << endl;
+    f_consts_ << endl;
+    indent_down();
+    f_consts_ << indent() << "def is_awating_response(self, seqid):" << endl;
+    indent_up();
+    f_consts_ << indent() << "origin_id = seqid & SEQ_ORIGIN_MASK" << endl;
+    f_consts_ << indent() << "return origin_id == self._origin_id" << endl;
+    f_consts_ << endl;
+    indent_down();
+    f_consts_ << indent() << "def get_client_id(self, seqid):" << endl;
+    indent_up();
+    f_consts_ << indent() << "return seqid & SEQ_ID_MASK" << endl;
+    f_consts_ << endl;
+    indent_down();
+    indent_down();
+  }
 }
 
 /**
@@ -742,6 +806,10 @@ void t_py_generator::generate_py_struct_definition(ofstream& out,
     out << "):" << endl;
 
     indent_up();
+    
+    if (is_exception) {
+      indent(out) << "TException.__init__(self, text);" << endl;
+    }
 
     for (m_iter = members.begin(); m_iter != members.end(); ++m_iter) {
       // Initialize fields
@@ -832,6 +900,16 @@ void t_py_generator::generate_py_struct_definition(ofstream& out,
 
     out << indent() << "return not (self == other)" << endl;
     indent_down();
+    
+    if (is_exception) {
+      out << endl;
+        
+      out << indent() << "def __hash__(self):" << endl;
+      indent_up();
+
+      out << indent() << "return hash(self.text)" << endl;
+      indent_down();
+    }
   } else if (!gen_dynamic_) {
     out << endl;
     // no base class available to implement __eq__ and __repr__ and __ne__ for us
@@ -1058,6 +1136,10 @@ void t_py_generator::generate_service(t_service* tservice) {
     f_service_ << "from tornado import gen" << endl;
     f_service_ << "from tornado import concurrent" << endl;
   }
+  
+  if (gen_websock_) {
+    f_service_ << "from .constants import ResponseReadyEvent, SEQ_ORIGIN_MASK, SEQ_ID_MASK" << endl;
+  }
 
   // Generate the three main parts of the service
   generate_service_interface(tservice);
@@ -1195,6 +1277,15 @@ void t_py_generator::generate_service_client(t_service* tservice) {
   } else if (gen_tornado_) {
     f_service_ << indent()
                << "def __init__(self, transport, iprot_factory, oprot_factory=None):" << endl;
+  } else if (gen_websock_) {
+    f_service_ << indent() << "def __init__(self, origin_id, client_id, dispatcher, iprot, oprot=None):" << endl;
+    indent_up();
+    f_service_ << indent() << "assert origin_id & SEQ_ORIGIN_MASK == origin_id, 'origin_id carries information which would get lost when masked with SEQ_ORIGIN_MASK. Either you adapt SEQ_ORIGIN_MASK system wide or that origin_id was just invalid.'" << endl;
+    f_service_ << indent() << "assert client_id & SEQ_ID_MASK == client_id, 'client_id carries information which would get lost when masked with SEQ_ID_MASK. Either you adapt SEQ_ID_MASK system wide or that client_id was just invalid.'" << endl;
+    f_service_ << indent() << "self._seqid = origin_id | client_id" << endl;
+    f_service_ << indent() << "self._client_id = client_id" << endl;
+    f_service_ << indent() << "self._dispatcher = dispatcher" << endl;
+    indent_down();
   } else {
     f_service_ << indent() << "def __init__(self, iprot, oprot=None):" << endl;
   }
@@ -1218,8 +1309,10 @@ void t_py_generator::generate_service_client(t_service* tservice) {
     } else {
       f_service_ << indent() << "self._iprot = self._oprot = iprot" << endl
                  << indent() << "if oprot is not None:" << endl
-                 << indent() << indent_str() << "self._oprot = oprot" << endl
-                 << indent() << "self._seqid = 0" << endl;
+                 << indent() << indent_str() << "self._oprot = oprot" << endl;
+      if (!gen_websock_) {
+        f_service_ << indent() << "self._seqid = 0" << endl;
+      }
     }
   } else {
     if (gen_twisted_) {
@@ -1292,6 +1385,13 @@ void t_py_generator::generate_service_client(t_service* tservice) {
       }
       indent(f_service_) << "self.send_" << funname << "(";
 
+    } else if (gen_websock_) {
+      f_service_ << indent() << "response_ready = ResponseReadyEvent()" << endl;
+      f_service_ << indent() << "try:" << endl;
+      indent_up();
+      f_service_ << indent() << "self._dispatcher.register_awaiting_response(self._client_id, response_ready)" << endl;
+      f_service_ << endl;
+      indent(f_service_) << "self.send_" << funname << "(";
     } else {
       indent(f_service_) << "self.send_" << funname << "(";
     }
@@ -1318,6 +1418,19 @@ void t_py_generator::generate_service_client(t_service* tservice) {
         // nothing. See the next block.
       } else if (gen_tornado_) {
         indent(f_service_) << "return future" << endl;
+      } else if (gen_websock_) {
+        f_service_ << endl;
+        f_service_ << indent() << "response_ready.wait()" << endl;
+        f_service_ << endl;
+        f_service_ << indent();
+        if (!(*f_iter)->get_returntype()->is_void()) f_service_ << "ret = ";
+        f_service_ << "self.recv_" << funname << "(*response_ready.message_begin)" << endl;
+        if (!(*f_iter)->get_returntype()->is_void()) f_service_ << indent() << "return ret" << endl;
+        indent_down();
+        f_service_ << indent() << "finally:" << endl;
+        indent_up();
+        f_service_ << indent() << "response_ready.response_processed.set()" << endl;
+        indent_down();
       } else {
         f_service_ << indent();
         if (!(*f_iter)->get_returntype()->is_void()) {
@@ -1406,6 +1519,8 @@ void t_py_generator::generate_service_client(t_service* tservice) {
       if (gen_twisted_ || gen_tornado_) {
         f_service_ << indent() << "def recv_" << (*f_iter)->get_name()
                    << "(self, iprot, mtype, rseqid):" << endl;
+      } else if (gen_websock_) {
+        f_service_ << indent() << "def recv_" << (*f_iter)->get_name() << "(self, fname, mtype, rseqid):" << endl;
       } else {
         t_struct noargs(program_);
         t_function recv_function((*f_iter)->get_returntype(),
@@ -1420,7 +1535,7 @@ void t_py_generator::generate_service_client(t_service* tservice) {
       if (gen_twisted_) {
         f_service_ << indent() << "d = self._reqs.pop(rseqid)" << endl;
       } else if (gen_tornado_) {
-      } else {
+      } else if (!gen_websock_) {
         f_service_ << indent() << "iprot = self._iprot" << endl << indent()
                    << "(fname, mtype, rseqid) = iprot.readMessageBegin()" << endl;
       }
@@ -1753,10 +1868,23 @@ void t_py_generator::generate_service_server(t_service* tservice) {
   f_service_ << endl;
 
   // Generate the server implementation
-  f_service_ << indent() << "def process(self, iprot, oprot):" << endl;
-  indent_up();
+  if (!gen_websock_) {
+    f_service_ << indent() << "def process(self, iprot, oprot):" << endl;
+    indent_up();
 
-  f_service_ << indent() << "(name, type, seqid) = iprot.readMessageBegin()" << endl;
+    f_service_ << indent() << "(name, type, seqid) = iprot.readMessageBegin()" << endl;
+  } else {
+    f_service_ << indent() << "def process(self, iprot, oprot, message_begin=None):" << endl;
+    indent_up();
+    f_service_ << indent() << "if message_begin is None:" << endl;
+    indent_up();
+    f_service_ << indent() << "(name, type, seqid) = iprot.readMessageBegin()" << endl;
+    indent_down();
+    f_service_ << indent() << "else:" << endl;
+    indent_up();
+    f_service_ << indent() << "(name, type, seqid) = message_begin" << endl;
+    indent_down();
+  }
 
   // TODO(mcslee): validate message
 

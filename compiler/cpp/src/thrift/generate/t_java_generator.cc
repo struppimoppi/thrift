@@ -45,6 +45,18 @@ using std::vector;
 
 static const string endl = "\n"; // avoid ostream << std::endl flushes
 
+
+class tmessage : public t_type {
+ public:
+  tmessage(t_program* program) :
+    t_type(program, "TMessage") {}
+
+  virtual std::string get_fingerprint_material() const {
+    throw "no fingerprint material for TMessage.";
+  }
+};
+
+
 /**
  * Java code generator.
  *
@@ -70,6 +82,7 @@ public:
     use_option_type_ = false;
     undated_generated_annotations_  = false;
     suppress_generated_annotations_ = false;
+    gen_websock_ = false;
     for( iter = parsed_options.begin(); iter != parsed_options.end(); ++iter) {
       if( iter->first.compare("beans") == 0) {
         bean_style_ = true;
@@ -99,6 +112,8 @@ public:
         } else {
           throw "unknown option java:" + iter->first + "=" + iter->second;
         }
+      } else if( iter->first.compare("websock") == 0) {
+        gen_websock_ = true;
       } else {
         throw "unknown option java:" + iter->first;
       }
@@ -367,6 +382,7 @@ private:
   bool use_option_type_;
   bool undated_generated_annotations_;
   bool suppress_generated_annotations_;
+  bool gen_websock_;
 
 };
 
@@ -2851,6 +2867,13 @@ void t_java_generator::generate_service_client(t_service* tservice) {
   indent(f_service_) << "return new Client(iprot, oprot);" << endl;
   indent_down();
   indent(f_service_) << "}" << endl;
+  if (gen_websock_) {
+    indent(f_service_) << "public Client getClient(org.apache.thrift.protocol.TProtocol iprot, org.apache.thrift.protocol.TProtocol oprot, int origin_id) {" << endl;
+    indent_up();
+    indent(f_service_) << "return new Client(iprot, oprot, origin_id);" << endl;
+    indent_down();
+    indent(f_service_) << "}" << endl;
+  }
   indent_down();
   indent(f_service_) << "}" << endl << endl;
 
@@ -2864,6 +2887,17 @@ void t_java_generator::generate_service_client(t_service* tservice) {
                         "org.apache.thrift.protocol.TProtocol oprot) {" << endl;
   indent(f_service_) << "  super(iprot, oprot);" << endl;
   indent(f_service_) << "}" << endl << endl;
+  
+  if (gen_websock_) {
+    indent(f_service_) << "public Client(org.apache.thrift.protocol.TProtocol iprot, org.apache.thrift.protocol.TProtocol oprot, int origin_id) {" << endl;
+    indent(f_service_) << "  super(iprot, oprot);" << endl;
+    indent(f_service_) << "  seqid_ = origin_id;" << endl;
+    indent(f_service_) << "}" << endl << endl;
+
+    indent(f_service_) << "public void setInputProtocol(TProtocol iprot) {" << endl;
+    indent(f_service_) << "    this.iprot_ = iprot;" << endl;
+    indent(f_service_) << "}" << endl << endl;
+  }
 
   // Generate client method implementations
   vector<t_function*> functions = tservice->get_functions();
@@ -2936,17 +2970,50 @@ void t_java_generator::generate_service_client(t_service* tservice) {
     if (!(*f_iter)->is_oneway()) {
       string resultname = (*f_iter)->get_name() + "_result";
 
-      t_struct noargs(program_);
-      t_function recv_function((*f_iter)->get_returntype(),
-                               string("recv") + sep + javaname,
-                               &noargs,
-                               (*f_iter)->get_xceptions());
-      // Open function
-      indent(f_service_) << "public " << function_signature(&recv_function) << endl;
+      if (gen_websock_) {
+
+        t_struct noargs(program_);
+        t_function recv_function((*f_iter)->get_returntype(),
+                                    string("recv_") + funname,
+                                    &noargs,
+                                    (*f_iter)->get_xceptions());
+        // Open function
+        indent(f_service_) << "public " << function_signature(&recv_function) << endl;
+        indent(f_service_) << "{" << endl;
+        indent(f_service_) << "    ";
+        if (!(*f_iter)->get_returntype()->is_void())
+            indent(f_service_) << "return ";
+            indent(f_service_) << "recv_" + funname + "(iprot_.readMessageBegin());" << endl;
+            indent(f_service_) << "}" << endl << endl;
+
+            t_struct args(program_);
+            t_type *tm = new tmessage(program_);
+            t_field af(tm, "msg");
+            args.append(&af);
+            t_function recv_function2((*f_iter)->get_returntype(),
+                                        string("recv_") + (*f_iter)->get_name(),
+                                        &args,
+                                        (*f_iter)->get_xceptions());
+            indent(f_service_) << "public " << function_signature(&recv_function2) << endl;
+
+      } else {
+          t_struct noargs(program_);
+          t_function recv_function((*f_iter)->get_returntype(),
+                                   string("recv") + sep + javaname,
+                                   &noargs,
+                                   (*f_iter)->get_xceptions());
+          // Open function
+          indent(f_service_) << "public " << function_signature(&recv_function) << endl;
+      }
+      
       scope_up(f_service_);
 
-      f_service_ << indent() << resultname << " result = new " << resultname << "();" << endl
-                 << indent() << "receiveBase(result, \"" << funname << "\");" << endl;
+      f_service_ << indent() << resultname << " result = new " << resultname << "();" << endl;
+      if (!gen_websock_) {
+        f_service_ << indent() << "receiveBase(result, \"" << funname << "\");" << endl;
+      } else {
+        f_service_ << indent() << "receiveBase(result, \"" << funname << "\", msg);" << endl;
+      }
 
       // Careful, only return _result if not a void function
       if (!(*f_iter)->get_returntype()->is_void()) {
