@@ -60,6 +60,7 @@ public:
     gen_tornado_ = false;
     gen_zope_interface_ = false;
     gen_twisted_ = false;
+    gen_wsasync_ = false;
     gen_dynamic_ = false;
     coding_ = "";
     gen_dynbaseclass_ = "";
@@ -67,6 +68,9 @@ public:
     gen_dynbaseclass_frozen_ = "";
     import_dynbase_ = "";
     package_prefix_ = "";
+
+    int num_async_switches = 0;
+
     for( iter = parsed_options.begin(); iter != parsed_options.end(); ++iter) {
       if( iter->first.compare("new_style") == 0) {
         pwarning(0, "new_style is enabled by default, so the option will be removed in the near future.\n");
@@ -111,8 +115,13 @@ public:
       } else if( iter->first.compare("twisted") == 0) {
         gen_twisted_ = true;
         gen_zope_interface_ = true;
+        num_async_switches++;
+      } else if( iter->first.compare("wsasync") == 0) {
+        gen_wsasync_ = true;
+        num_async_switches++;
       } else if( iter->first.compare("tornado") == 0) {
         gen_tornado_ = true;
+        num_async_switches++;
       } else if( iter->first.compare("coding") == 0) {
         coding_ = iter->second;
       } else {
@@ -120,16 +129,19 @@ public:
       }
     }
 
-    if (gen_twisted_ && gen_tornado_) {
-      throw "at most one of 'twisted' and 'tornado' are allowed";
+    if (num_async_switches > 1) {
+      throw "at most one of 'twisted', 'tornado' and 'wsasync' are allowed";
     }
 
     copy_options_ = option_string;
 
+    // why are these async switches so "privileged" to get their own base dir?
     if (gen_twisted_) {
       out_dir_base_ = "gen-py.twisted";
     } else if (gen_tornado_) {
       out_dir_base_ = "gen-py.tornado";
+    } else if (gen_wsasync_) {
+      out_dir_base_ = "gen-py.wsasync";
     } else {
       out_dir_base_ = "gen-py";
     }
@@ -303,6 +315,11 @@ private:
    * True if we should generate Twisted-friendly RPC services.
    */
   bool gen_twisted_;
+
+  /**
+   * True if we should generate WebSocket/asyncio based RPC services.
+   */
+  bool gen_wsasync_;
 
   /**
    * True if we should generate code for use with Tornado
@@ -1336,7 +1353,11 @@ void t_py_generator::generate_service_client(t_service* tservice) {
 
     f_service_ << endl;
     // Open function
-    indent(f_service_) << "def " << function_signature(*f_iter, false) << ":" << endl;
+    if (gen_wsasync_) {
+      indent(f_service_) << "async def " << function_signature(*f_iter, false) << ":" << endl;
+    } else {
+      indent(f_service_) << "def " << function_signature(*f_iter, false) << ":" << endl;
+    }
     indent_up();
     generate_python_docstring(f_service_, (*f_iter));
     if (gen_twisted_) {
@@ -1377,6 +1398,9 @@ void t_py_generator::generate_service_client(t_service* tservice) {
         // nothing. See the next block.
       } else if (gen_tornado_) {
         indent(f_service_) << "return future" << endl;
+      } else if (gen_wsasync_) {
+        indent(f_service_) << "iprot = await self._iprot.wait_for_message(TMessageType.REPLY, TMessageType.EXCEPTION)" << endl;
+        indent(f_service_) << "return " << "self.recv_" << funname << "(iprot)" << endl;
       } else {
         f_service_ << indent();
         if (!(*f_iter)->get_returntype()->is_void()) {
@@ -1466,10 +1490,12 @@ void t_py_generator::generate_service_client(t_service* tservice) {
         f_service_ << indent() << "def recv_" << (*f_iter)->get_name()
                    << "(self, iprot, mtype, rseqid):" << endl;
       } else {
-        t_struct noargs(program_);
+        t_struct args(program_);
+        t_field iprot_arg(NULL, string("iprot"));
+        args.append(&iprot_arg);
         t_function recv_function((*f_iter)->get_returntype(),
                                  string("recv_") + (*f_iter)->get_name(),
-                                 &noargs);
+                                 &args);
         f_service_ << indent() << "def " << function_signature(&recv_function) << ":" << endl;
       }
       indent_up();
@@ -1480,8 +1506,10 @@ void t_py_generator::generate_service_client(t_service* tservice) {
         f_service_ << indent() << "d = self._reqs.pop(rseqid)" << endl;
       } else if (gen_tornado_) {
       } else {
-        f_service_ << indent() << "iprot = self._iprot" << endl << indent()
-                   << "(fname, mtype, rseqid) = iprot.readMessageBegin()" << endl;
+    	  if (!gen_wsasync_) {
+    		  f_service_ << indent() << "iprot = self._iprot" << endl;
+    	  }
+        f_service_ << indent() << "(fname, mtype, rseqid) = iprot.readMessageBegin()" << endl;
       }
 
       f_service_ << indent() << "if mtype == TMessageType.EXCEPTION:" << endl
@@ -1813,7 +1841,11 @@ void t_py_generator::generate_service_server(t_service* tservice) {
   f_service_ << endl;
 
   // Generate the server implementation
-  f_service_ << indent() << "def process(self, iprot, oprot):" << endl;
+  f_service_ << indent();
+  if (gen_wsasync_) {
+    f_service_ << "async ";
+  }
+  f_service_ << "def process(self, iprot, oprot):" << endl;
   indent_up();
 
   f_service_ << indent() << "(name, type, seqid) = iprot.readMessageBegin()" << endl;
@@ -1847,8 +1879,11 @@ void t_py_generator::generate_service_server(t_service* tservice) {
     f_service_ << indent() << indent_str()
                << "return self._processMap[name](self, seqid, iprot, oprot)" << endl;
   } else {
-    f_service_ << indent() << indent_str() << "self._processMap[name](self, seqid, iprot, oprot)"
-               << endl;
+    f_service_ << indent() << indent_str();
+    if (gen_wsasync_) {
+      f_service_ << "await ";
+    }
+    f_service_ << "self._processMap[name](self, seqid, iprot, oprot)" << endl;
 
     // Read end of args field, the T_STOP, and the struct close
     f_service_ << indent() << "return True" << endl;
@@ -1877,8 +1912,11 @@ void t_py_generator::generate_process_function(t_service* tservice, t_function* 
     f_service_ << indent() << "@gen.coroutine" << endl << indent() << "def process_"
                << tfunction->get_name() << "(self, seqid, iprot, oprot):" << endl;
   } else {
-    f_service_ << indent() << "def process_" << tfunction->get_name()
-               << "(self, seqid, iprot, oprot):" << endl;
+    f_service_ << indent();
+    if (gen_wsasync_) {
+      f_service_ << "async ";
+    }
+    f_service_ << "def process_" << tfunction->get_name() << "(self, seqid, iprot, oprot):" << endl;
   }
 
   indent_up();
@@ -2078,6 +2116,9 @@ void t_py_generator::generate_process_function(t_service* tservice, t_function* 
     f_service_ << indent();
     if (!tfunction->is_oneway() && !tfunction->get_returntype()->is_void()) {
       f_service_ << "result.success = ";
+    }
+    if (gen_wsasync_) {
+      f_service_ << "await ";
     }
     f_service_ << "self._handler." << tfunction->get_name() << "(";
     bool first = true;
@@ -2729,6 +2770,7 @@ THRIFT_REGISTER_GENERATOR(
     "    zope.interface:  Generate code for use with zope.interface.\n"
     "    twisted:         Generate Twisted-friendly RPC services.\n"
     "    tornado:         Generate code for use with Tornado.\n"
+    "    wsasync:         Generate WebSocket/asyncio based code.\n"
     "    no_utf8strings:  Do not Encode/decode strings using utf8 in the generated code. Basically no effect for Python 3.\n"
     "    coding=CODING:   Add file encoding declare in generated file.\n"
     "    slots:           Generate code using slots for instance members.\n"

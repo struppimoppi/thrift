@@ -1,0 +1,13 @@
+#!/bin/bash
+
+pushd `dirname $0` > /dev/null
+P=`pwd`
+popd > /dev/null
+
+THRIFT_COMPILER=thrift
+
+for p in "client" "server"; do
+    rm -rf $P/$p
+    $THRIFT_COMPILER -out . --gen py:coding=utf-8,wsasync $p.thrift
+    echo "generated $p"
+done
