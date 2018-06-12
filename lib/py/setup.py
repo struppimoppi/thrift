@@ -103,6 +103,7 @@ def run_setup(with_binary):
           packages=[
               'thrift',
               'thrift.protocol',
+              'thrift.protocol.wsasync',
               'thrift.transport',
               'thrift.server',
           ],
