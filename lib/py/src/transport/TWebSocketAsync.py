@@ -124,7 +124,7 @@ class TBufferedWebSocketClientTransport(TBufferedWebSocketTransportBase):
 
     CONNECT_TIMEOUT = 5
 
-    def __init__(self, ws_protocol, loop):
+    def __init__(self, ws_protocol, loop, hostname_port):
         super().__init__(ws_protocol)
 
         # die asyncio-loop
@@ -133,10 +133,12 @@ class TBufferedWebSocketClientTransport(TBufferedWebSocketTransportBase):
         # der asyncio-Connection-Transport, welche wir von loop.create_connection() erhalten
         self._t = None
 
+        self._hostname_port = hostname_port
+
     async def open(self):
 
         async def connect():
-            (t, p) = await self._l.create_connection(lambda: self._p, '127.0.0.1', 9000)
+            (t, p) = await self._l.create_connection(lambda: self._p, self._hostname_port[0], self._hostname_port[1])
             assert p is self._p
             self._t = t
 
